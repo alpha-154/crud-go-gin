@@ -34,6 +34,7 @@ func CreateRestaurant(restaurant models.Restaurant) (*mongo.InsertOneResult, err
 
 	// Generate a new MongoDB ObjectID
 	restaurant.ID = primitive.NewObjectID()
+	fmt.Println("Generated ObjectID:", restaurant.ID)
 
 	// Convert ObjectID to a string and store it in RestaurantID
 	restaurant.RestaurantID = restaurant.ID.Hex()
