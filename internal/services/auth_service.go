@@ -4,14 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/alpha-154/crud-go-gin/internal/config"
 	"github.com/alpha-154/crud-go-gin/internal/helpers"
 
+	"github.com/alpha-154/crud-go-gin/internal/dto"
 	"github.com/alpha-154/crud-go-gin/internal/models"
-	"github.com/golang-jwt/jwt/v5"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -57,13 +56,6 @@ func SignUp(user models.User) (*models.User, error) {
 		user.Role = "user"
 	}
 
-	// Generate refresh token using the helper function
-	refreshTokenString, err := helpers.GenerateRefreshToken(user.UserID)
-	if err != nil {
-		return nil, err
-	}
-	user.RefreshToken = refreshTokenString
-
 	// Save user to the database
 	_, err = getUserCollection().InsertOne(ctx, user)
 	if err != nil {
@@ -77,7 +69,8 @@ func SignUp(user models.User) (*models.User, error) {
 	return &user, nil
 }
 
-func SignIn(input models.SignInInput) (*models.TokenResponse, error) {
+// SignIn authenticates a user and generates the required tokens
+func SignIn(input dto.SignInInput) (*dto.SignInServiceResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -93,42 +86,36 @@ func SignIn(input models.SignInInput) (*models.TokenResponse, error) {
 		return nil, errors.New("invalid credentials")
 	}
 
-	// Generate access token
-	token := jwt.New(jwt.SigningMethodHS256)
-	claims := token.Claims.(jwt.MapClaims)
-	claims["user_id"] = user.UserID
-	claims["role"] = user.Role
-	claims["exp"] = time.Now().Add(time.Hour).Unix()
-
-	accessToken, err := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
-	if err != nil {
-		return nil, err
-	}
-
-	// Generate new refresh token
-	refreshToken := jwt.New(jwt.SigningMethodHS256)
-	rtClaims := refreshToken.Claims.(jwt.MapClaims)
-	rtClaims["user_id"] = user.UserID
-	rtClaims["exp"] = time.Now().Add(time.Hour * 24 * 7).Unix()
-
-	refreshTokenString, err := refreshToken.SignedString([]byte(os.Getenv("JWT_SECRET")))
+	// Generate access & refresh token
+	token, err := helpers.GenerateTokenPair(user.UserID, user.Role)
 	if err != nil {
 		return nil, err
 	}
 
 	// Update refresh token in database
-	update := bson.M{"$set": bson.M{"refresh_token": refreshTokenString, "updated_at": time.Now()}}
-	_, err = getUserCollection().UpdateOne(ctx, bson.M{"user_id": user.UserID}, update)
+	updateResult, err := getUserCollection().UpdateOne(
+		ctx,
+		bson.M{"user_id": user.UserID}, // Ensure user.UserID is a string
+		bson.M{"$set": bson.M{"refresh_token": token.RefreshToken}},
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	return &models.TokenResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshTokenString,
+	fmt.Println("Matched count:", updateResult.MatchedCount, "Modified count:", updateResult.ModifiedCount)
+
+	// If no document was modified, return an error
+	if updateResult.MatchedCount == 0 {
+		return nil, errors.New("failed to update refresh token")
+	}
+
+	return &dto.SignInServiceResponse{
+		AccessToken:  token.AccessToken,
+		RefreshToken: token.RefreshToken,
 	}, nil
 }
 
+// GetUserByID retrieves a user by ID
 func GetUserByID(userID string) (*models.User, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -143,6 +130,7 @@ func GetUserByID(userID string) (*models.User, error) {
 	return &user, nil
 }
 
+// GetAllUsers retrieves all users
 func GetAllUsers() ([]models.User, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -164,4 +152,16 @@ func GetAllUsers() ([]models.User, error) {
 	}
 
 	return users, nil
+}
+
+// InvalidateUserTokens invalidates the refresh token for a user
+func InvalidateUserTokens(userID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := getUserCollection().UpdateOne(ctx, bson.M{"user_id": userID}, bson.M{"$set": bson.M{"refresh_token": ""}})
+	if err != nil {
+		return err
+	}
+	return nil
 }
